@@ -78,21 +78,21 @@ def copy_logs_from_rds_to_s3(rds_instance_name, s3_bucket_name, region, log_pref
             print(f"FileNumber: {copied_file_count + 1}")
             filename = db_log['LogFileName']
             size = int(db_log['Size'])
-            print(
-                f"Downloading file: {filename} found w/ LastWritten value of: {db_log['LastWritten']} ({size} bytes)")
-            if int(db_log['LastWritten']) > last_written_this_run:
-                last_written_this_run = int(db_log['LastWritten']) + 1
+            log_last_written = int(db_log['LastWritten'])
+            print(f"Downloading file: {filename} found w/ LastWritten value of: {log_last_written} ({size} bytes)")
 
             # Download the log file
             try:
                 log_file_data = get_log_file_via_rest(http, filename, rds_instance_name, region)
             except Exception as e:
-                print(f"File '{filename}' download failed: {e}")
-                continue
+                raise RuntimeError(f"File '{filename}' download failed: {e}")
+
+            if log_last_written > last_written_this_run:
+                last_written_this_run = log_last_written + 1
 
             compressed_size = len(log_file_data)
-            difference = 100 * (compressed_size - size) // size
-            print(f"Compressed log file size: {compressed_size} bytes ({difference}% difference)")
+            pct_difference = 100 * (compressed_size - size) // size
+            print(f"Compressed log file size: {compressed_size} bytes ({pct_difference}% difference)")
 
             # Upload the log file to S3
             object_name = f"{rds_instance_name}/backup_{backup_start_time.isoformat()}/{filename}.gz"
@@ -102,6 +102,7 @@ def copy_logs_from_rds_to_s3(rds_instance_name, s3_bucket_name, region, log_pref
             except ClientError as e:
                 err_msg = f"Error writing object to S3 bucket, S3 ClientError: {e.response['Error']['Message']}"
                 raise RuntimeError(err_msg)
+
             print(f"Uploaded log file {object_name} to S3 bucket {s3_bucket_name}")
 
     print(f"Copied {copied_file_count} file(s) to S3")
@@ -115,9 +116,10 @@ def copy_logs_from_rds_to_s3(rds_instance_name, s3_bucket_name, region, log_pref
                 Body=str.encode(str(last_written_this_run))
             )
         except ClientError as e:
-            print(f"Error writing the config to S3 bucket, S3 ClientError: {e.response['Error']['Message']}")
-            return
-        print(f"Wrote new Last Written file to {config_file_name} in Bucket {s3_bucket_name} with timestamp {last_written_this_run}")
+            err_msg = f"Error writing the config to S3 bucket, S3 ClientError: {e.response['Error']['Message']}"
+            raise RuntimeError(err_msg)
+
+        print(f"Wrote new config to {config_file_name} in S3 bucket {s3_bucket_name} with timestamp {last_written_this_run}")
 
     print("Log file export complete")
 
@@ -262,13 +264,14 @@ def build_canonical_query_string(access_key, credential_scope, amz_date, signed_
     :return: The canonical query string, as defined in the AWS documentation
     """
     credentials = quote_plus(f"{access_key}/{credential_scope}")
-    canonical_querystring = 'X-Amz-Algorithm=AWS4-HMAC-SHA256' + \
-                            f'&X-Amz-Credential={credentials}' \
-                            f'&X-Amz-Date={amz_date}' + \
-                            '&X-Amz-Expires=30' + \
-                            f'&X-Amz-SignedHeaders={signed_headers}'
+    canonical_querystring = ''
+    canonical_querystring += 'X-Amz-Algorithm=AWS4-HMAC-SHA256'
+    canonical_querystring += '&X-Amz-Credential=' + credentials
+    canonical_querystring += '&X-Amz-Date=' + amz_date
+    canonical_querystring += '&X-Amz-Expires=30'
     if session_token is not None:
-        canonical_querystring += f'&X-Amz-Security-Token={quote_plus(session_token)}'
+        canonical_querystring += '&X-Amz-Security-Token=' + quote_plus(session_token)
+    canonical_querystring += '&X-Amz-SignedHeaders=' + signed_headers
     return canonical_querystring
 
 
